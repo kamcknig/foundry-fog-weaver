@@ -10,10 +10,19 @@
     "verified": "14"
   },
   "authors": [],
-  "esmodules": ["scripts/fogweaver.mjs", "scripts/layer.mjs"],
-  "styles": ["styles/fogweaver.css"],
+  "esmodules": [
+    "scripts/fogweaver.mjs",
+    "scripts/layer.mjs"
+  ],
+  "styles": [
+    "styles/fogweaver.css"
+  ],
   "languages": [
-    { "lang": "en", "name": "English", "path": "lang/en.json" }
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
   ],
   "socket": false,
   "relationships": {
@@ -21,7 +30,9 @@
       {
         "id": "lib-wrapper",
         "type": "module",
-        "compatibility": { "minimum": "1.12" }
+        "compatibility": {
+          "minimum": "1.12"
+        }
       }
     ]
   }
