@@ -1,6 +1,6 @@
 import { FogWeaverLayer, drawShapeGeometry, registerFogWeaverCallbacks, hexToRgbArray } from "./layer.mjs";
 
-const MODULE_ID = "fogweaver";
+const MODULE_ID = "fog-weaver";
 
 Hooks.once("init", () => {
     game.settings.register(MODULE_ID, "enabled", {

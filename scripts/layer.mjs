@@ -1,4 +1,4 @@
-const MODULE_ID = "fogweaver";
+const MODULE_ID = "fog-weaver";
 
 /** Convert a CSS hex color string (e.g. "#1a2b3c") to a [r, g, b] array in 0–1 range. */
 export function hexToRgbArray(hex) {

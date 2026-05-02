@@ -2,7 +2,7 @@
   "id": "fog-weaver",
   "title": "Fog Weaver",
   "description": "Gives the GM full manual control over fog of war. When enabled, token movement no longer reveals fog — the GM paints revealed and hidden areas with circle, rectangle, line, and freehand drawing tools. Supports erase mode (Alt), center-origin and constrain modifiers (Shift/Ctrl), undo, and per-client fog opacity and tint controls.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "manifest": "https://raw.githubusercontent.com/kamcknig/foundry-fog-weaver/master/module.json",
   "download": "https://github.com/kamcknig/foundry-fog-weaver/releases/download/v0.1.0/module.zip",
   "compatibility": {
