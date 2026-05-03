@@ -49,13 +49,19 @@ jobs:
               --generate-notes
           fi
 
-      - name: Commit updated module.json to master
+      - name: Commit updated module.json to source branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          SOURCE_BRANCH=$(git branch -r --contains HEAD \
+            | grep -v 'HEAD' \
+            | sed 's|.*origin/||' \
+            | tr -d ' ' \
+            | head -1)
+          SOURCE_BRANCH=${SOURCE_BRANCH:-master}
           cp module.json /tmp/module.json
-          git checkout master
+          git checkout "$SOURCE_BRANCH"
           cp /tmp/module.json module.json
           git add module.json
           git diff --cached --quiet || git commit -m "chore: update module.json to $VERSION"
-          git push origin master
+          git push origin "$SOURCE_BRANCH"
