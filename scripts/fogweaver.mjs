@@ -443,13 +443,12 @@ function _wrapFogCommit() {
         "foundry.canvas.perception.FogManager.prototype._handleReset",
         async function (wrapped, ...args) {
             if (game.user.isGM && game.settings.get(MODULE_ID, "enabled")) {
-                // Reset clears both the shape history and the canvas. Drop the cached
-                // `weaverFog` snapshot too — otherwise toggling OFF then ON after a reset
-                // would replay the pre-reset FW state, which is not what the user expects.
-                await canvas.scene.update({
-                    [`flags.${MODULE_ID}.-=shapes`]: null,
-                    [`flags.${MODULE_ID}.-=weaverFog`]: null
-                });
+                // Reset clears just this level's shape history and weaverFog snapshot.
+                // Other levels' painted state is independent and must survive a reset on
+                // this level. Dropping the weaverFog slot prevents toggling OFF then ON
+                // after a reset from replaying the pre-reset FW state.
+                await _setShapesForCurrentLevel([]);
+                await _setWeaverFogForCurrentLevel(null);
             }
             return wrapped(...args);
         },
@@ -559,18 +558,19 @@ function _wrapFogCommit() {
 }
 
 /**
- * Swap the user's fog state between FW (scene-level) and normal (per-user).
+ * Swap the user's fog state between FW (per-level scene flag) and normal (per-user).
  *
  * Behavior depends on the new value of the `enabled` setting:
  * - On enable (true): snapshot the current `canvas.fog.exploration.explored` to the
- *   user's `FogExploration.flags.fogweaver.normalSnapshot`, then load
- *   `scene.flags.fogweaver.weaverFog` (or null/blank) into `explored`.
- * - On disable (false): the GM extracts the current canvas state into
- *   `scene.flags.fogweaver.weaverFog`. Each user (including GM) then loads their own
- *   `flags.fogweaver.normalSnapshot` (or null/blank) into `explored`.
+ *   user's `FogExploration.flags.fogweaver.normalSnapshot`, then load the current
+ *   level's weaverFog (or null/blank) into `explored`. Sets `activeMode: "weaver"`.
+ * - On disable (false): the GM extracts the current canvas state into the current
+ *   level's weaverFog slot. Each user (including GM) then loads their own
+ *   `flags.fogweaver.normalSnapshot` (or null/blank) into `explored`. Sets
+ *   `activeMode: "normal"`.
  *
- * The atomic FogExploration update writes both the new `explored` value and (on enable)
- * the snapshot flag in one DB roundtrip, with `loadFog: false` to suppress the
+ * The atomic FogExploration update writes both the new `explored` value and the
+ * snapshot/activeMode flags in one DB roundtrip, with `loadFog: false` to suppress the
  * auto-reload triggered by `_onUpdate`. The caller must run `canvas.visibility.draw()`
  * afterwards to actually load the new texture.
  *
@@ -591,35 +591,38 @@ async function _swapFogState(enabled) {
     const threshold = game.settings.get(MODULE_ID, "snapshotSizeWarning");
 
     if (enabled) {
-        // Toggle ON: save current normal state to user's snapshot, load FW state
-        // from scene flag. Single update with both fields keeps it atomic.
-        const weaverFog = canvas.scene.getFlag(MODULE_ID, "weaverFog") ?? null;
+        // Toggle ON: save current normal state to user's snapshot, load FW state from the
+        // current level's slot. Single update with all fields keeps it atomic.
+        const weaverFog = _getWeaverFogForCurrentLevel();
         const normalSize = kb(currentExplored);
-        console.log(`[Fog Weaver] Swap → FW active | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
+        console.log(`[Fog Weaver] Swap → FW active | level=${_getLevelKey()} | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
         if (normalSize > threshold) {
             ui.notifications.warn(game.i18n.format("FOGWEAVER.Warnings.SnapshotLarge", { size: normalSize, threshold, type: game.i18n.localize("FOGWEAVER.Warnings.SnapshotTypeNormal") }));
         }
         await exploration.update({
-            flags: { [MODULE_ID]: { normalSnapshot: currentExplored } },
+            flags: { [MODULE_ID]: { normalSnapshot: currentExplored, activeMode: "weaver" } },
             explored: weaverFog
         }, { loadFog: false });
         return;
     }
 
-    // Toggle OFF: GM saves current FW state to scene flag (canonical FW state).
-    // Every client then restores their own normal-state snapshot.
+    // Toggle OFF: GM saves current FW state to the current level's scene flag slot (canonical
+    // FW state). Every client then restores their own normal-state snapshot.
     const normalSnapshot = exploration.getFlag(MODULE_ID, "normalSnapshot") ?? null;
     if (game.user.isGM) {
         const weaverSize = kb(currentExplored);
-        console.log(`[Fog Weaver] Swap → normal active | weaverFog saved: ${weaverSize} KB, normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
+        console.log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | weaverFog saved: ${weaverSize} KB, normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
         if (weaverSize > threshold) {
             ui.notifications.warn(game.i18n.format("FOGWEAVER.Warnings.SnapshotLarge", { size: weaverSize, threshold, type: game.i18n.localize("FOGWEAVER.Warnings.SnapshotTypeWeaver") }));
         }
-        await canvas.scene.setFlag(MODULE_ID, "weaverFog", currentExplored);
+        await _setWeaverFogForCurrentLevel(currentExplored);
     } else {
-        console.log(`[Fog Weaver] Swap → normal active | normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
+        console.log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
     }
-    await exploration.update({ explored: normalSnapshot }, { loadFog: false });
+    await exploration.update({
+        flags: { [MODULE_ID]: { activeMode: "normal" } },
+        explored: normalSnapshot
+    }, { loadFog: false });
 }
 
 export async function commitShape(shape) {
@@ -712,16 +715,16 @@ async function _saveAndSync() {
 // last write wins. The fog texture itself is fine (it's the canonical state for players);
 // only the undo history (scene.flags.fogweaver.shapes) can drop entries. Acceptable for v1.
 async function _persistShape(shapeData) {
-    const shapes = canvas.scene.getFlag(MODULE_ID, "shapes") ?? [];
+    const shapes = _getShapesForCurrentLevel().slice();
     shapes.push({ id: foundry.utils.randomID(), ...shapeData });
-    await canvas.scene.setFlag(MODULE_ID, "shapes", shapes);
+    await _setShapesForCurrentLevel(shapes);
 }
 
 export async function _undoLastShape() {
-    const shapes = (canvas.scene.getFlag(MODULE_ID, "shapes") ?? []).slice();
+    const shapes = _getShapesForCurrentLevel().slice();
     if (!shapes.length) return;
     shapes.pop();
-    await canvas.scene.setFlag(MODULE_ID, "shapes", shapes);
+    await _setShapesForCurrentLevel(shapes);
     await _rebuildFogFromShapes(shapes);
 }
 
