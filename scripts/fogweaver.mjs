@@ -2,6 +2,83 @@ import { FogWeaverLayer, drawShapeGeometry, registerFogWeaverCallbacks, hexToRgb
 
 const MODULE_ID = "fog-weaver";
 
+/**
+ * Sentinel level key used on v13, which has no concept of levels.
+ * Every read/write routes through this single key so v13 scenes
+ * are handled identically to a single-level v14 scene.
+ */
+const LEGACY_LEVEL_KEY = "_default";
+
+/**
+ * Resolve the current level id, or the v13 sentinel.
+ * v14: canvas.scene._view is the active level id (string).
+ * v13: no levels concept — every read/write routes through "_default".
+ *
+ * @returns {string} The current level id, or "_default" on v13.
+ */
+function _getLevelKey() {
+    return canvas.scene?._view ?? LEGACY_LEVEL_KEY;
+}
+
+/**
+ * Read the shapes array for the current level from the scene flags.
+ * Returns an empty array when the scene has no shapes flag yet, when
+ * the flag is in the legacy single-array shape (pre-migration), or
+ * when this level has never been painted on.
+ *
+ * @returns {object[]} The shapes for the current level.
+ */
+function _getShapesForCurrentLevel() {
+    const all = canvas.scene.getFlag(MODULE_ID, "shapes");
+    if (!all) return [];
+    if (Array.isArray(all)) return all; // legacy / pre-migration scenes
+    return all[_getLevelKey()] ?? [];
+}
+
+/**
+ * Write the shapes array for the current level via setFlag. Always
+ * writes the keyed object format — never the legacy array format.
+ *
+ * @param {object[]} shapes - The shapes array to store for this level.
+ * @returns {Promise<void>}
+ */
+async function _setShapesForCurrentLevel(shapes) {
+    const all = canvas.scene.getFlag(MODULE_ID, "shapes");
+    const map = (!all || Array.isArray(all)) ? {} : { ...all };
+    map[_getLevelKey()] = shapes;
+    await canvas.scene.setFlag(MODULE_ID, "shapes", map);
+}
+
+/**
+ * Read the weaverFog base64 string for the current level from the
+ * scene flags. Returns null when absent or when the flag is in the
+ * legacy single-string shape (pre-migration).
+ *
+ * @returns {string|null} The weaverFog base64 string, or null if absent.
+ */
+function _getWeaverFogForCurrentLevel() {
+    const all = canvas.scene.getFlag(MODULE_ID, "weaverFog");
+    if (!all) return null;
+    if (typeof all === "string") return all; // legacy / pre-migration
+    return all[_getLevelKey()] ?? null;
+}
+
+/**
+ * Write the weaverFog base64 string for the current level via setFlag.
+ * Always writes the keyed object format — never the legacy string format.
+ * Pass null to clear just this level's slot.
+ *
+ * @param {string|null} value - The base64 weaverFog string, or null to clear.
+ * @returns {Promise<void>}
+ */
+async function _setWeaverFogForCurrentLevel(value) {
+    const all = canvas.scene.getFlag(MODULE_ID, "weaverFog");
+    const map = (!all || typeof all === "string") ? {} : { ...all };
+    if (value === null) delete map[_getLevelKey()];
+    else map[_getLevelKey()] = value;
+    await canvas.scene.setFlag(MODULE_ID, "weaverFog", map);
+}
+
 Hooks.once("init", () => {
     game.settings.register(MODULE_ID, "enabled", {
         name: "FOGWEAVER.Settings.Enabled.Name",
@@ -128,6 +205,44 @@ Hooks.on("sightRefresh", () => {
     if (!layer._gmOverlay && liveTex?.valid) {
         layer._buildGMOverlay();
     }
+});
+
+// One-time migration: convert legacy single-bucket fog scene flags to the per-level keyed
+// layout introduced in v14. Runs on the GM only, once per world (at game-ready time), so
+// all scenes are migrated up-front before any per-level writes can inadvertently discard
+// legacy data. Uses a progress-bar notification for worlds with many scenes.
+// Gate flag: `scene.flags.fogweaver.levelsMigratedToV14` per scene.
+Hooks.once("ready", async () => {
+    if (!game.user.isGM) return;
+    if (game.release.generation < 14) return;
+
+    const toMigrate = game.scenes.filter(s =>
+        !s.getFlag(MODULE_ID, "levelsMigratedToV14") &&
+        (Array.isArray(s.getFlag(MODULE_ID, "shapes")) || typeof s.getFlag(MODULE_ID, "weaverFog") === "string")
+    );
+
+    if (!toMigrate.length) return;
+
+    const progress = ui.notifications.info(
+        `Fog Weaver: Migrating fog data for ${toMigrate.length} scene(s)...`,
+        { progress: true, console: false }
+    );
+
+    for (let i = 0; i < toMigrate.length; i++) {
+        const scene = toMigrate[i];
+        progress.update({ pct: i / toMigrate.length, message: `Fog Weaver: Migrating "${scene.name}" (${i + 1}/${toMigrate.length})` });
+
+        const legacyShapes = scene.getFlag(MODULE_ID, "shapes");
+        const legacyWeaverFog = scene.getFlag(MODULE_ID, "weaverFog");
+        const targetKey = scene.levels?.contents?.[0]?.id ?? scene.initialLevel?.id ?? LEGACY_LEVEL_KEY;
+        const update = { flags: { [MODULE_ID]: { levelsMigratedToV14: true } } };
+        if (Array.isArray(legacyShapes)) update.flags[MODULE_ID].shapes = { [targetKey]: legacyShapes };
+        if (typeof legacyWeaverFog === "string") update.flags[MODULE_ID].weaverFog = { [targetKey]: legacyWeaverFog };
+        await scene.update(update);
+        console.log(`${MODULE_ID} | migrated scene "${scene.name}" to per-level fog layout (key: ${targetKey})`);
+    }
+
+    progress.update({ pct: 1.0, message: `Fog Weaver: Migrated ${toMigrate.length} scene(s)` });
 });
 
 // Inject the opacity slider + tint picker as a fixed-position panel anchored to the right
