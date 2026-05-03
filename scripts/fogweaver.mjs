@@ -245,6 +245,31 @@ Hooks.once("ready", async () => {
     progress.update({ pct: 1.0, message: `Fog Weaver: Migrated ${toMigrate.length} scene(s)` });
 });
 
+// On every level/scene enter, reconcile the just-loaded FogExploration's active mode with the
+// live FW enabled setting. A toggle only swaps the currently-viewed level; this hook catches
+// any other level whose FogExploration was left in the wrong mode and swaps it on first visit.
+Hooks.on("canvasReady", async () => {
+    if (!game.settings.get(MODULE_ID, "isolateStates")) return;
+    const exploration = canvas.fog?.exploration;
+    if (!exploration?.id) return;
+
+    const enabled = game.settings.get(MODULE_ID, "enabled");
+    const activeMode = exploration.getFlag(MODULE_ID, "activeMode") ?? "normal";
+    const desired = enabled ? "weaver" : "normal";
+    if (activeMode === desired) return;
+
+    console.log(`[Fog Weaver] Reconcile → level=${_getLevelKey()} | ${activeMode} → ${desired}`);
+    await _swapFogState(enabled);
+
+    // _swapFogState writes explored with loadFog:false to avoid a double reload.
+    // Trigger one explicit reload now so the canvas texture reflects the swap.
+    await canvas.visibility.draw();
+    for (const token of canvas.tokens.placeables) {
+        if (!token.isPreview) token.initializeSources();
+    }
+    canvas.perception.initialize();
+});
+
 // Inject the opacity slider + tint picker as a fixed-position panel anchored to the right
 // of the tools section. Fixed positioning escapes #scene-controls' overflow:hidden and the
 // narrow (~72px) column-1 width, giving us a full-width panel to work with.
