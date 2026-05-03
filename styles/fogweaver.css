@@ -1,0 +1,75 @@
+/* Fog Weaver styles */
+
+#fw-controls-panel {
+    position: fixed;
+    z-index: 9999;
+    width: 180px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(20, 10, 10, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    backdrop-filter: blur(4px);
+    pointer-events: auto;
+}
+
+#fw-controls-panel .fw-label {
+    font-size: 11px;
+    color: #ccc;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0;
+}
+
+#fw-controls-panel .fw-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#fw-opacity-slider {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+    accent-color: #7ec8e3;
+}
+
+#fw-opacity-value {
+    font-size: 11px;
+    color: #ddd;
+    min-width: 32px;
+    text-align: right;
+}
+
+#fw-tint-picker {
+    width: 40px;
+    height: 26px;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    background: none;
+    border-radius: 3px;
+}
+
+#fw-controls-panel .fw-sep {
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    margin: 4px 0 2px;
+    width: 100%;
+}
+
+#fw-controls-panel .fw-hints {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 0 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #bbb;
+}
+
+#fw-controls-panel .fw-hints li {
+    margin: 0;
+    padding: 1px 0;
+}
