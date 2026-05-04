@@ -2,6 +2,9 @@ import { FogWeaverLayer, drawShapeGeometry, registerFogWeaverCallbacks, hexToRgb
 
 const MODULE_ID = "fog-weaver";
 
+// Holds the lighting layer's original reset onChange so it can be restored when FW is disabled.
+let _originalLightingResetOnChange = null;
+
 /**
  * Sentinel level key used on v13, which has no concept of levels.
  * Every read/write routes through this single key so v13 scenes
@@ -276,6 +279,26 @@ Hooks.on("canvasReady", async () => {
 Hooks.on("renderSceneControls", (_app, html) => {
     // Always remove any stale panel first so it doesn't linger after control change.
     document.querySelector("#fw-controls-panel")?.remove();
+
+    // On v14, the lighting layer's Reset Fog button shows its own Yes/No dialog before calling
+    // canvas.fog.reset(). When FW is active our FogManager.prototype.reset wrapper already
+    // provides the level-aware dialog, so we replace the lighting layer's onChange with a direct
+    // canvas.fog.reset() call to avoid showing two sequential confirmation dialogs. The original
+    // is restored when FW is disabled so the lighting layer's default dialog comes back.
+    if (game.release.generation >= 14) {
+        const resetTool = ui.controls?.controls?.lighting?.tools?.reset;
+        if (resetTool) {
+            if (game.settings.get(MODULE_ID, "enabled")) {
+                if (!_originalLightingResetOnChange) {
+                    _originalLightingResetOnChange = resetTool.onChange;
+                }
+                resetTool.onChange = () => canvas.fog.reset();
+            } else if (_originalLightingResetOnChange) {
+                resetTool.onChange = _originalLightingResetOnChange;
+                _originalLightingResetOnChange = null;
+            }
+        }
+    }
 
     if (!game.user.isGM) return;
     if (!game.settings.get(MODULE_ID, "enabled")) return;
