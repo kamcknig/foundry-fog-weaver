@@ -44,7 +44,11 @@
             "HintCtrl": "Ctrl + drag: circle / square (shapes only)",
             "ResetFog": "Reset Fog",
             "ResetFogTitle": "Reset Fog of War",
-            "ResetFogContent": "This will erase all revealed and hidden areas and clear the drawing history. This cannot be undone."
+            "ResetFogContent": "This will erase all revealed and hidden areas and clear the drawing history. This cannot be undone.",
+            "ResetFogContentMultiLevel": "This will erase revealed and hidden areas and clear the drawing history. This cannot be undone. Choose which levels to reset.",
+            "ResetFogAllLevels": "All Levels",
+            "ResetFogCurrentLevel": "Current Level",
+            "ResetFogCancel": "Cancel"
         },
         "Warnings": {
             "SnapshotLarge": "Fog Weaver: the {type} fog snapshot is {size} KB, which exceeds the {threshold} KB warning threshold. Consider resetting fog if it has grown unexpectedly large.",

@@ -75,6 +75,12 @@ Press **Ctrl+Z** (or the Foundry undo keybind) to remove the most recently drawn
 
 Click the **Reset Fog** button (cloud icon, bottom of the tool list) to erase all revealed and hidden areas and clear the entire drawing history. This operation cannot be undone.
 
+### Multi-level scenes (Foundry v14+)
+
+In Foundry v14, scenes support multiple levels. Fog Weaver treats each level as a fully independent fog map — painted shapes, drawing history, and the fog texture are all stored and restored per level. Painting on level A and switching to level B shows level B's fog; switching back to level A shows level A's painting exactly as it was left.
+
+Undo and Reset Fog operate on the currently-viewed level only and do not affect any other level's data.
+
 ## Settings
 
 | Setting | Scope | Default | Description |

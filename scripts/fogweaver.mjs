@@ -461,19 +461,63 @@ async function _onEnabledChange(enabled) {
 }
 
 function _wrapFogCommit() {
-    // When fog is reset (via Foundry's lighting-layer button or any socket caller), also clear
-    // the module's stored shape history so undo doesn't replay shapes drawn before the reset.
+    // Intercept canvas.fog.reset() to show a level-aware confirmation dialog when FW is active
+    // on v14. In v13 (or when FW is disabled), the original reset runs immediately with no dialog.
+    // On v14 with a single-level scene: same Yes/No dialog as before.
+    // On v14 with multiple levels: All Levels / Current Level / Cancel.
+    libWrapper.register(
+        MODULE_ID,
+        "foundry.canvas.perception.FogManager.prototype.reset",
+        async function (wrapped) {
+            if (!game.settings.get(MODULE_ID, "enabled") || game.release.generation < 14) {
+                return wrapped();
+            }
+            const levelCount = canvas.scene?.levels?.size ?? 0;
+            if (levelCount <= 1) {
+                return foundry.applications.api.DialogV2.confirm({
+                    window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
+                    content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContent")}</p>`,
+                    yes: { callback: () => _resetCurrentLevelFog() }
+                });
+            }
+            return foundry.applications.api.DialogV2.wait({
+                window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
+                content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContentMultiLevel")}</p>`,
+                buttons: [
+                    {
+                        action: "all",
+                        label: game.i18n.localize("FOGWEAVER.Controls.ResetFogAllLevels"),
+                        icon: "fa-solid fa-layer-group",
+                        callback: () => wrapped()
+                    },
+                    {
+                        action: "current",
+                        label: game.i18n.localize("FOGWEAVER.Controls.ResetFogCurrentLevel"),
+                        icon: "fa-solid fa-location-dot",
+                        default: true,
+                        callback: () => _resetCurrentLevelFog()
+                    },
+                    {
+                        action: "cancel",
+                        label: game.i18n.localize("FOGWEAVER.Controls.ResetFogCancel"),
+                        icon: "fa-solid fa-xmark"
+                    }
+                ],
+                rejectClose: false
+            });
+        },
+        "MIXED"
+    );
+
+    // When a full scene reset fires (the "All Levels" path or the standard Foundry reset button),
+    // clear all levels' FW data so undo can't replay shapes drawn before the reset.
     libWrapper.register(
         MODULE_ID,
         "foundry.canvas.perception.FogManager.prototype._handleReset",
         async function (wrapped, ...args) {
             if (game.user.isGM && game.settings.get(MODULE_ID, "enabled")) {
-                // Reset clears just this level's shape history and weaverFog snapshot.
-                // Other levels' painted state is independent and must survive a reset on
-                // this level. Dropping the weaverFog slot prevents toggling OFF then ON
-                // after a reset from replaying the pre-reset FW state.
-                await _setShapesForCurrentLevel([]);
-                await _setWeaverFogForCurrentLevel(null);
+                await canvas.scene.unsetFlag(MODULE_ID, "shapes");
+                await canvas.scene.unsetFlag(MODULE_ID, "weaverFog");
             }
             return wrapped(...args);
         },
@@ -725,6 +769,13 @@ async function _saveAndSync() {
         canvas.fog.exploration = typeof canvas.fog._createExplorationDocument === "function"
             ? canvas.fog._createExplorationDocument()
             : new (getDocumentClass("FogExploration"))({ scene: canvas.scene.id, user: game.user.id });
+        // A freshly-created doc has no activeMode flag, so the canvasReady reconciliation
+        // defaults it to "normal" and immediately overwrites the new texture with weaverFog
+        // (null after a reset), erasing the shape just drawn. Stamp the mode before the doc
+        // is persisted so reconciliation sees it as already correct on the next level visit.
+        if (game.settings.get(MODULE_ID, "enabled")) {
+            canvas.fog.exploration.updateSource({ flags: { [MODULE_ID]: { activeMode: "weaver" } } });
+        }
     }
     canvas.fog._updated = true;
     await canvas.fog.save();
@@ -772,4 +823,24 @@ async function _rebuildFogFromShapes(shapes) {
 
     await _saveAndSync();
     canvas.perception.initialize();
+}
+
+/**
+ * Reset the fog for the currently-viewed level only.
+ *
+ * canvas.fog.reset() emits a server socket that deletes ALL FogExploration documents for the
+ * scene (every level). This function targets only the current level by deleting just
+ * canvas.fog.exploration. FogExploration._onDelete already checks (user + scene + level) before
+ * calling canvas.fog.load(), so other levels' documents and fog states are untouched.
+ */
+async function _resetCurrentLevelFog() {
+    await _setShapesForCurrentLevel([]);
+    await _setWeaverFogForCurrentLevel(null);
+
+    if (canvas.fog.exploration?.id) {
+        await canvas.fog.exploration.delete();
+    } else {
+        canvas.visibility.resetExploration();
+        canvas.perception.initialize();
+    }
 }

@@ -52,13 +52,7 @@ export class FogWeaverLayer extends foundry.canvas.layers.InteractionLayer {
                     title: "FOGWEAVER.Controls.ResetFog",
                     icon: "fa-solid fa-cloud",
                     button: true,
-                    onChange: () => {
-                        foundry.applications.api.DialogV2.confirm({
-                            window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
-                            content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContent")}</p>`,
-                            yes: { callback: () => canvas.fog.reset() }
-                        });
-                    }
+                    onChange: () => canvas.fog.reset()
                 }
             },
             activeTool: "revealCircle"
