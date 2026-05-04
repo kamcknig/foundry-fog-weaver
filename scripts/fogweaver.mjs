@@ -755,13 +755,19 @@ function _ensureRenderTexture() {
         clearColor: [0, 0, 0, 1],
         textureConfiguration: canvas.fog.textureConfiguration
     });
-    // Render via a zero-positioned temporary sprite so we don't inherit the fog sprite's
-    // worldTransform offset (sceneX, sceneY). Rendering the original sprite directly would
-    // shift the existing fog content by +(sceneX, sceneY) in the new texture, causing all
-    // previously-drawn shapes to drift on the next commit after a disable/re-enable cycle.
-    const tempSprite = new PIXI.Sprite(sprite.texture);
-    canvas.app.renderer.render(tempSprite, { renderTexture: newTex, clear: false });
-    tempSprite.destroy({ texture: false });
+    // Mirror Foundry's FogManager.commit() pattern for the same case (sprite still has a plain
+    // loaded texture, not a RenderTexture): render the live sprite into the new texture using
+    // a transform matrix that negates its (sceneX, sceneY) position, so the content lands at
+    // (0,0) in the destination. Foundry uses this exact pattern in v14 (PIXI v8) — see
+    // FogManager.commit() — so the `transform` render option is reliable when invoked this way.
+    // Using the live sprite (not a freshly-constructed PIXI.Sprite) inherits its already-correct
+    // width/height/scale from FogManager so the copy is pixel-exact regardless of source
+    // texture resolution vs destination texture resolution.
+    const dims = canvas.dimensions;
+    const transform = new PIXI.Matrix();
+    transform.tx = -dims.sceneX;
+    transform.ty = -dims.sceneY;
+    canvas.app.renderer.render(sprite, { renderTexture: newTex, clear: false, transform });
     const oldTex = sprite.texture;
     sprite.texture = newTex;
     // Re-point the GM overlay at the new texture before destroying the old one.
