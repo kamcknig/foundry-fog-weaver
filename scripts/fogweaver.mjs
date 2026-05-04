@@ -6,6 +6,21 @@ const MODULE_ID = "fog-weaver";
 let _originalLightingResetOnChange = null;
 
 /**
+ * Emit a console.log message only when debug logging is enabled in module settings.
+ * Safe to call before settings are registered (silently suppressed).
+ *
+ * @param {...any} args - Arguments forwarded to console.log.
+ */
+function _log(...args) {
+    try {
+        if (!game.settings.get(MODULE_ID, "debugLogging")) return;
+    } catch {
+        return;
+    }
+    console.log(...args);
+}
+
+/**
  * Sentinel level key used on v13, which has no concept of levels.
  * Every read/write routes through this single key so v13 scenes
  * are handled identically to a single-level v14 scene.
@@ -83,6 +98,15 @@ async function _setWeaverFogForCurrentLevel(value) {
 }
 
 Hooks.once("init", () => {
+    game.settings.register(MODULE_ID, "debugLogging", {
+        name: "FOGWEAVER.Settings.DebugLogging.Name",
+        hint: "FOGWEAVER.Settings.DebugLogging.Hint",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: false
+    });
+
     game.settings.register(MODULE_ID, "enabled", {
         name: "FOGWEAVER.Settings.Enabled.Name",
         hint: "FOGWEAVER.Settings.Enabled.Hint",
@@ -242,7 +266,7 @@ Hooks.once("ready", async () => {
         if (Array.isArray(legacyShapes)) update.flags[MODULE_ID].shapes = { [targetKey]: legacyShapes };
         if (typeof legacyWeaverFog === "string") update.flags[MODULE_ID].weaverFog = { [targetKey]: legacyWeaverFog };
         await scene.update(update);
-        console.log(`${MODULE_ID} | migrated scene "${scene.name}" to per-level fog layout (key: ${targetKey})`);
+        _log(`${MODULE_ID} | migrated scene "${scene.name}" to per-level fog layout (key: ${targetKey})`);
     }
 
     progress.update({ pct: 1.0, message: `Fog Weaver: Migrated ${toMigrate.length} scene(s)` });
@@ -261,7 +285,7 @@ Hooks.on("canvasReady", async () => {
     const desired = enabled ? "weaver" : "normal";
     if (activeMode === desired) return;
 
-    console.log(`[Fog Weaver] Reconcile → level=${_getLevelKey()} | ${activeMode} → ${desired}`);
+    _log(`[Fog Weaver] Reconcile → level=${_getLevelKey()} | ${activeMode} → ${desired}`);
     await _swapFogState(enabled);
 
     // _swapFogState writes explored with loadFog:false to avoid a double reload.
@@ -697,7 +721,7 @@ async function _swapFogState(enabled) {
         // current level's slot. Single update with all fields keeps it atomic.
         const weaverFog = _getWeaverFogForCurrentLevel();
         const normalSize = kb(currentExplored);
-        console.log(`[Fog Weaver] Swap → FW active | level=${_getLevelKey()} | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
+        _log(`[Fog Weaver] Swap → FW active | level=${_getLevelKey()} | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
         if (normalSize > threshold) {
             ui.notifications.warn(game.i18n.format("FOGWEAVER.Warnings.SnapshotLarge", { size: normalSize, threshold, type: game.i18n.localize("FOGWEAVER.Warnings.SnapshotTypeNormal") }));
         }
@@ -713,13 +737,13 @@ async function _swapFogState(enabled) {
     const normalSnapshot = exploration.getFlag(MODULE_ID, "normalSnapshot") ?? null;
     if (game.user.isGM) {
         const weaverSize = kb(currentExplored);
-        console.log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | weaverFog saved: ${weaverSize} KB, normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
+        _log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | weaverFog saved: ${weaverSize} KB, normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
         if (weaverSize > threshold) {
             ui.notifications.warn(game.i18n.format("FOGWEAVER.Warnings.SnapshotLarge", { size: weaverSize, threshold, type: game.i18n.localize("FOGWEAVER.Warnings.SnapshotTypeWeaver") }));
         }
         await _setWeaverFogForCurrentLevel(currentExplored);
     } else {
-        console.log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
+        _log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
     }
     await exploration.update({
         flags: { [MODULE_ID]: { activeMode: "normal" } },
