@@ -613,6 +613,16 @@ function _wrapFogCommit() {
             if (!game.settings.get(MODULE_ID, "enabled")) return;
             if (!canvas.scene?.tokenVision) return;
 
+            // In v14, the explored container includes a SurfaceExposureContainer that renders
+            // the token's current vision polygon into uSampler. The VisibilityFilter reads `r`
+            // from uSampler, so `r` combines both the fog exploration sprite AND live token
+            // vision via surface exposure. Our shader patch changes max(r,v) to r, but r already
+            // includes that vision — so on scenes with walls or levels (where surface exposure
+            // produces data), the token's LOS remains visible without any FW shapes drawn.
+            // Fix: disable the SurfaceExposureContainer so uSampler.r carries only the fog
+            // exploration sprite (i.e., only what the GM has explicitly revealed).
+            if (this.surfaceExposure) this.surfaceExposure.visible = false;
+
             // In v14, VisibilityFilter.defaultUniforms is a static getter that returns a new
             // object on each call, so assigning uFogAlpha to it in the init hook has no
             // persistent effect. The filter instance starts with uFogAlpha undefined (GLSL
