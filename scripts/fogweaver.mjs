@@ -2,6 +2,86 @@ import { FogWeaverLayer, drawShapeGeometry, registerFogWeaverCallbacks, hexToRgb
 
 const MODULE_ID = "fog-weaver";
 
+// Holds the lighting layer's original reset onChange so it can be restored when FW is disabled.
+let _originalLightingResetOnChange = null;
+
+/**
+ * Sentinel level key used on v13, which has no concept of levels.
+ * Every read/write routes through this single key so v13 scenes
+ * are handled identically to a single-level v14 scene.
+ */
+const LEGACY_LEVEL_KEY = "_default";
+
+/**
+ * Resolve the current level id, or the v13 sentinel.
+ * v14: canvas.scene._view is the active level id (string).
+ * v13: no levels concept — every read/write routes through "_default".
+ *
+ * @returns {string} The current level id, or "_default" on v13.
+ */
+function _getLevelKey() {
+    return canvas.scene?._view ?? LEGACY_LEVEL_KEY;
+}
+
+/**
+ * Read the shapes array for the current level from the scene flags.
+ * Returns an empty array when the scene has no shapes flag yet, when
+ * the flag is in the legacy single-array shape (pre-migration), or
+ * when this level has never been painted on.
+ *
+ * @returns {object[]} The shapes for the current level.
+ */
+function _getShapesForCurrentLevel() {
+    const all = canvas.scene.getFlag(MODULE_ID, "shapes");
+    if (!all) return [];
+    if (Array.isArray(all)) return all; // legacy / pre-migration scenes
+    return all[_getLevelKey()] ?? [];
+}
+
+/**
+ * Write the shapes array for the current level via setFlag. Always
+ * writes the keyed object format — never the legacy array format.
+ *
+ * @param {object[]} shapes - The shapes array to store for this level.
+ * @returns {Promise<void>}
+ */
+async function _setShapesForCurrentLevel(shapes) {
+    const all = canvas.scene.getFlag(MODULE_ID, "shapes");
+    const map = (!all || Array.isArray(all)) ? {} : { ...all };
+    map[_getLevelKey()] = shapes;
+    await canvas.scene.setFlag(MODULE_ID, "shapes", map);
+}
+
+/**
+ * Read the weaverFog base64 string for the current level from the
+ * scene flags. Returns null when absent or when the flag is in the
+ * legacy single-string shape (pre-migration).
+ *
+ * @returns {string|null} The weaverFog base64 string, or null if absent.
+ */
+function _getWeaverFogForCurrentLevel() {
+    const all = canvas.scene.getFlag(MODULE_ID, "weaverFog");
+    if (!all) return null;
+    if (typeof all === "string") return all; // legacy / pre-migration
+    return all[_getLevelKey()] ?? null;
+}
+
+/**
+ * Write the weaverFog base64 string for the current level via setFlag.
+ * Always writes the keyed object format — never the legacy string format.
+ * Pass null to clear just this level's slot.
+ *
+ * @param {string|null} value - The base64 weaverFog string, or null to clear.
+ * @returns {Promise<void>}
+ */
+async function _setWeaverFogForCurrentLevel(value) {
+    const all = canvas.scene.getFlag(MODULE_ID, "weaverFog");
+    const map = (!all || typeof all === "string") ? {} : { ...all };
+    if (value === null) delete map[_getLevelKey()];
+    else map[_getLevelKey()] = value;
+    await canvas.scene.setFlag(MODULE_ID, "weaverFog", map);
+}
+
 Hooks.once("init", () => {
     game.settings.register(MODULE_ID, "enabled", {
         name: "FOGWEAVER.Settings.Enabled.Name",
@@ -130,12 +210,95 @@ Hooks.on("sightRefresh", () => {
     }
 });
 
+// One-time migration: convert legacy single-bucket fog scene flags to the per-level keyed
+// layout introduced in v14. Runs on the GM only, once per world (at game-ready time), so
+// all scenes are migrated up-front before any per-level writes can inadvertently discard
+// legacy data. Uses a progress-bar notification for worlds with many scenes.
+// Gate flag: `scene.flags.fogweaver.levelsMigratedToV14` per scene.
+Hooks.once("ready", async () => {
+    if (!game.user.isGM) return;
+    if (game.release.generation < 14) return;
+
+    const toMigrate = game.scenes.filter(s =>
+        !s.getFlag(MODULE_ID, "levelsMigratedToV14") &&
+        (Array.isArray(s.getFlag(MODULE_ID, "shapes")) || typeof s.getFlag(MODULE_ID, "weaverFog") === "string")
+    );
+
+    if (!toMigrate.length) return;
+
+    const progress = ui.notifications.info(
+        `Fog Weaver: Migrating fog data for ${toMigrate.length} scene(s)...`,
+        { progress: true, console: false }
+    );
+
+    for (let i = 0; i < toMigrate.length; i++) {
+        const scene = toMigrate[i];
+        progress.update({ pct: i / toMigrate.length, message: `Fog Weaver: Migrating "${scene.name}" (${i + 1}/${toMigrate.length})` });
+
+        const legacyShapes = scene.getFlag(MODULE_ID, "shapes");
+        const legacyWeaverFog = scene.getFlag(MODULE_ID, "weaverFog");
+        const targetKey = scene.levels?.contents?.[0]?.id ?? scene.initialLevel?.id ?? LEGACY_LEVEL_KEY;
+        const update = { flags: { [MODULE_ID]: { levelsMigratedToV14: true } } };
+        if (Array.isArray(legacyShapes)) update.flags[MODULE_ID].shapes = { [targetKey]: legacyShapes };
+        if (typeof legacyWeaverFog === "string") update.flags[MODULE_ID].weaverFog = { [targetKey]: legacyWeaverFog };
+        await scene.update(update);
+        console.log(`${MODULE_ID} | migrated scene "${scene.name}" to per-level fog layout (key: ${targetKey})`);
+    }
+
+    progress.update({ pct: 1.0, message: `Fog Weaver: Migrated ${toMigrate.length} scene(s)` });
+});
+
+// On every level/scene enter, reconcile the just-loaded FogExploration's active mode with the
+// live FW enabled setting. A toggle only swaps the currently-viewed level; this hook catches
+// any other level whose FogExploration was left in the wrong mode and swaps it on first visit.
+Hooks.on("canvasReady", async () => {
+    if (!game.settings.get(MODULE_ID, "isolateStates")) return;
+    const exploration = canvas.fog?.exploration;
+    if (!exploration?.id) return;
+
+    const enabled = game.settings.get(MODULE_ID, "enabled");
+    const activeMode = exploration.getFlag(MODULE_ID, "activeMode") ?? "normal";
+    const desired = enabled ? "weaver" : "normal";
+    if (activeMode === desired) return;
+
+    console.log(`[Fog Weaver] Reconcile → level=${_getLevelKey()} | ${activeMode} → ${desired}`);
+    await _swapFogState(enabled);
+
+    // _swapFogState writes explored with loadFog:false to avoid a double reload.
+    // Trigger one explicit reload now so the canvas texture reflects the swap.
+    await canvas.visibility.draw();
+    for (const token of canvas.tokens.placeables) {
+        if (!token.isPreview) token.initializeSources();
+    }
+    canvas.perception.initialize();
+});
+
 // Inject the opacity slider + tint picker as a fixed-position panel anchored to the right
 // of the tools section. Fixed positioning escapes #scene-controls' overflow:hidden and the
 // narrow (~72px) column-1 width, giving us a full-width panel to work with.
 Hooks.on("renderSceneControls", (_app, html) => {
     // Always remove any stale panel first so it doesn't linger after control change.
     document.querySelector("#fw-controls-panel")?.remove();
+
+    // On v14, the lighting layer's Reset Fog button shows its own Yes/No dialog before calling
+    // canvas.fog.reset(). When FW is active our FogManager.prototype.reset wrapper already
+    // provides the level-aware dialog, so we replace the lighting layer's onChange with a direct
+    // canvas.fog.reset() call to avoid showing two sequential confirmation dialogs. The original
+    // is restored when FW is disabled so the lighting layer's default dialog comes back.
+    if (game.release.generation >= 14) {
+        const resetTool = ui.controls?.controls?.lighting?.tools?.reset;
+        if (resetTool) {
+            if (game.settings.get(MODULE_ID, "enabled")) {
+                if (!_originalLightingResetOnChange) {
+                    _originalLightingResetOnChange = resetTool.onChange;
+                }
+                resetTool.onChange = () => canvas.fog.reset();
+            } else if (_originalLightingResetOnChange) {
+                resetTool.onChange = _originalLightingResetOnChange;
+                _originalLightingResetOnChange = null;
+            }
+        }
+    }
 
     if (!game.user.isGM) return;
     if (!game.settings.get(MODULE_ID, "enabled")) return;
@@ -321,20 +484,63 @@ async function _onEnabledChange(enabled) {
 }
 
 function _wrapFogCommit() {
-    // When fog is reset (via Foundry's lighting-layer button or any socket caller), also clear
-    // the module's stored shape history so undo doesn't replay shapes drawn before the reset.
+    // Intercept canvas.fog.reset() to show a level-aware confirmation dialog when FW is active
+    // on v14. In v13 (or when FW is disabled), the original reset runs immediately with no dialog.
+    // On v14 with a single-level scene: same Yes/No dialog as before.
+    // On v14 with multiple levels: All Levels / Current Level / Cancel.
+    libWrapper.register(
+        MODULE_ID,
+        "foundry.canvas.perception.FogManager.prototype.reset",
+        async function (wrapped) {
+            if (!game.settings.get(MODULE_ID, "enabled") || game.release.generation < 14) {
+                return wrapped();
+            }
+            const levelCount = canvas.scene?.levels?.size ?? 0;
+            if (levelCount <= 1) {
+                return foundry.applications.api.DialogV2.confirm({
+                    window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
+                    content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContent")}</p>`,
+                    yes: { callback: () => _resetCurrentLevelFog() }
+                });
+            }
+            return foundry.applications.api.DialogV2.wait({
+                window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
+                content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContentMultiLevel")}</p>`,
+                buttons: [
+                    {
+                        action: "all",
+                        label: game.i18n.localize("FOGWEAVER.Controls.ResetFogAllLevels"),
+                        icon: "fa-solid fa-layer-group",
+                        callback: () => wrapped()
+                    },
+                    {
+                        action: "current",
+                        label: game.i18n.localize("FOGWEAVER.Controls.ResetFogCurrentLevel"),
+                        icon: "fa-solid fa-location-dot",
+                        default: true,
+                        callback: () => _resetCurrentLevelFog()
+                    },
+                    {
+                        action: "cancel",
+                        label: game.i18n.localize("FOGWEAVER.Controls.ResetFogCancel"),
+                        icon: "fa-solid fa-xmark"
+                    }
+                ],
+                rejectClose: false
+            });
+        },
+        "MIXED"
+    );
+
+    // When a full scene reset fires (the "All Levels" path or the standard Foundry reset button),
+    // clear all levels' FW data so undo can't replay shapes drawn before the reset.
     libWrapper.register(
         MODULE_ID,
         "foundry.canvas.perception.FogManager.prototype._handleReset",
         async function (wrapped, ...args) {
             if (game.user.isGM && game.settings.get(MODULE_ID, "enabled")) {
-                // Reset clears both the shape history and the canvas. Drop the cached
-                // `weaverFog` snapshot too — otherwise toggling OFF then ON after a reset
-                // would replay the pre-reset FW state, which is not what the user expects.
-                await canvas.scene.update({
-                    [`flags.${MODULE_ID}.-=shapes`]: null,
-                    [`flags.${MODULE_ID}.-=weaverFog`]: null
-                });
+                await canvas.scene.unsetFlag(MODULE_ID, "shapes");
+                await canvas.scene.unsetFlag(MODULE_ID, "weaverFog");
             }
             return wrapped(...args);
         },
@@ -407,6 +613,16 @@ function _wrapFogCommit() {
             if (!game.settings.get(MODULE_ID, "enabled")) return;
             if (!canvas.scene?.tokenVision) return;
 
+            // In v14, the explored container includes a SurfaceExposureContainer that renders
+            // the token's current vision polygon into uSampler. The VisibilityFilter reads `r`
+            // from uSampler, so `r` combines both the fog exploration sprite AND live token
+            // vision via surface exposure. Our shader patch changes max(r,v) to r, but r already
+            // includes that vision — so on scenes with walls or levels (where surface exposure
+            // produces data), the token's LOS remains visible without any FW shapes drawn.
+            // Fix: disable the SurfaceExposureContainer so uSampler.r carries only the fog
+            // exploration sprite (i.e., only what the GM has explicitly revealed).
+            if (this.surfaceExposure) this.surfaceExposure.visible = false;
+
             // In v14, VisibilityFilter.defaultUniforms is a static getter that returns a new
             // object on each call, so assigning uFogAlpha to it in the init hook has no
             // persistent effect. The filter instance starts with uFogAlpha undefined (GLSL
@@ -444,18 +660,19 @@ function _wrapFogCommit() {
 }
 
 /**
- * Swap the user's fog state between FW (scene-level) and normal (per-user).
+ * Swap the user's fog state between FW (per-level scene flag) and normal (per-user).
  *
  * Behavior depends on the new value of the `enabled` setting:
  * - On enable (true): snapshot the current `canvas.fog.exploration.explored` to the
- *   user's `FogExploration.flags.fogweaver.normalSnapshot`, then load
- *   `scene.flags.fogweaver.weaverFog` (or null/blank) into `explored`.
- * - On disable (false): the GM extracts the current canvas state into
- *   `scene.flags.fogweaver.weaverFog`. Each user (including GM) then loads their own
- *   `flags.fogweaver.normalSnapshot` (or null/blank) into `explored`.
+ *   user's `FogExploration.flags.fogweaver.normalSnapshot`, then load the current
+ *   level's weaverFog (or null/blank) into `explored`. Sets `activeMode: "weaver"`.
+ * - On disable (false): the GM extracts the current canvas state into the current
+ *   level's weaverFog slot. Each user (including GM) then loads their own
+ *   `flags.fogweaver.normalSnapshot` (or null/blank) into `explored`. Sets
+ *   `activeMode: "normal"`.
  *
- * The atomic FogExploration update writes both the new `explored` value and (on enable)
- * the snapshot flag in one DB roundtrip, with `loadFog: false` to suppress the
+ * The atomic FogExploration update writes both the new `explored` value and the
+ * snapshot/activeMode flags in one DB roundtrip, with `loadFog: false` to suppress the
  * auto-reload triggered by `_onUpdate`. The caller must run `canvas.visibility.draw()`
  * afterwards to actually load the new texture.
  *
@@ -476,35 +693,38 @@ async function _swapFogState(enabled) {
     const threshold = game.settings.get(MODULE_ID, "snapshotSizeWarning");
 
     if (enabled) {
-        // Toggle ON: save current normal state to user's snapshot, load FW state
-        // from scene flag. Single update with both fields keeps it atomic.
-        const weaverFog = canvas.scene.getFlag(MODULE_ID, "weaverFog") ?? null;
+        // Toggle ON: save current normal state to user's snapshot, load FW state from the
+        // current level's slot. Single update with all fields keeps it atomic.
+        const weaverFog = _getWeaverFogForCurrentLevel();
         const normalSize = kb(currentExplored);
-        console.log(`[Fog Weaver] Swap → FW active | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
+        console.log(`[Fog Weaver] Swap → FW active | level=${_getLevelKey()} | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
         if (normalSize > threshold) {
             ui.notifications.warn(game.i18n.format("FOGWEAVER.Warnings.SnapshotLarge", { size: normalSize, threshold, type: game.i18n.localize("FOGWEAVER.Warnings.SnapshotTypeNormal") }));
         }
         await exploration.update({
-            flags: { [MODULE_ID]: { normalSnapshot: currentExplored } },
+            flags: { [MODULE_ID]: { normalSnapshot: currentExplored, activeMode: "weaver" } },
             explored: weaverFog
         }, { loadFog: false });
         return;
     }
 
-    // Toggle OFF: GM saves current FW state to scene flag (canonical FW state).
-    // Every client then restores their own normal-state snapshot.
+    // Toggle OFF: GM saves current FW state to the current level's scene flag slot (canonical
+    // FW state). Every client then restores their own normal-state snapshot.
     const normalSnapshot = exploration.getFlag(MODULE_ID, "normalSnapshot") ?? null;
     if (game.user.isGM) {
         const weaverSize = kb(currentExplored);
-        console.log(`[Fog Weaver] Swap → normal active | weaverFog saved: ${weaverSize} KB, normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
+        console.log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | weaverFog saved: ${weaverSize} KB, normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
         if (weaverSize > threshold) {
             ui.notifications.warn(game.i18n.format("FOGWEAVER.Warnings.SnapshotLarge", { size: weaverSize, threshold, type: game.i18n.localize("FOGWEAVER.Warnings.SnapshotTypeWeaver") }));
         }
-        await canvas.scene.setFlag(MODULE_ID, "weaverFog", currentExplored);
+        await _setWeaverFogForCurrentLevel(currentExplored);
     } else {
-        console.log(`[Fog Weaver] Swap → normal active | normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
+        console.log(`[Fog Weaver] Swap → normal active | level=${_getLevelKey()} | normalSnapshot loaded: ${kb(normalSnapshot)} KB`);
     }
-    await exploration.update({ explored: normalSnapshot }, { loadFog: false });
+    await exploration.update({
+        flags: { [MODULE_ID]: { activeMode: "normal" } },
+        explored: normalSnapshot
+    }, { loadFog: false });
 }
 
 export async function commitShape(shape) {
@@ -535,13 +755,19 @@ function _ensureRenderTexture() {
         clearColor: [0, 0, 0, 1],
         textureConfiguration: canvas.fog.textureConfiguration
     });
-    // Render via a zero-positioned temporary sprite so we don't inherit the fog sprite's
-    // worldTransform offset (sceneX, sceneY). Rendering the original sprite directly would
-    // shift the existing fog content by +(sceneX, sceneY) in the new texture, causing all
-    // previously-drawn shapes to drift on the next commit after a disable/re-enable cycle.
-    const tempSprite = new PIXI.Sprite(sprite.texture);
-    canvas.app.renderer.render(tempSprite, { renderTexture: newTex, clear: false });
-    tempSprite.destroy({ texture: false });
+    // Mirror Foundry's FogManager.commit() pattern for the same case (sprite still has a plain
+    // loaded texture, not a RenderTexture): render the live sprite into the new texture using
+    // a transform matrix that negates its (sceneX, sceneY) position, so the content lands at
+    // (0,0) in the destination. Foundry uses this exact pattern in v14 (PIXI v8) — see
+    // FogManager.commit() — so the `transform` render option is reliable when invoked this way.
+    // Using the live sprite (not a freshly-constructed PIXI.Sprite) inherits its already-correct
+    // width/height/scale from FogManager so the copy is pixel-exact regardless of source
+    // texture resolution vs destination texture resolution.
+    const dims = canvas.dimensions;
+    const transform = new PIXI.Matrix();
+    transform.tx = -dims.sceneX;
+    transform.ty = -dims.sceneY;
+    canvas.app.renderer.render(sprite, { renderTexture: newTex, clear: false, transform });
     const oldTex = sprite.texture;
     sprite.texture = newTex;
     // Re-point the GM overlay at the new texture before destroying the old one.
@@ -582,6 +808,13 @@ async function _saveAndSync() {
         canvas.fog.exploration = typeof canvas.fog._createExplorationDocument === "function"
             ? canvas.fog._createExplorationDocument()
             : new (getDocumentClass("FogExploration"))({ scene: canvas.scene.id, user: game.user.id });
+        // A freshly-created doc has no activeMode flag, so the canvasReady reconciliation
+        // defaults it to "normal" and immediately overwrites the new texture with weaverFog
+        // (null after a reset), erasing the shape just drawn. Stamp the mode before the doc
+        // is persisted so reconciliation sees it as already correct on the next level visit.
+        if (game.settings.get(MODULE_ID, "enabled")) {
+            canvas.fog.exploration.updateSource({ flags: { [MODULE_ID]: { activeMode: "weaver" } } });
+        }
     }
     canvas.fog._updated = true;
     await canvas.fog.save();
@@ -597,16 +830,16 @@ async function _saveAndSync() {
 // last write wins. The fog texture itself is fine (it's the canonical state for players);
 // only the undo history (scene.flags.fogweaver.shapes) can drop entries. Acceptable for v1.
 async function _persistShape(shapeData) {
-    const shapes = canvas.scene.getFlag(MODULE_ID, "shapes") ?? [];
+    const shapes = _getShapesForCurrentLevel().slice();
     shapes.push({ id: foundry.utils.randomID(), ...shapeData });
-    await canvas.scene.setFlag(MODULE_ID, "shapes", shapes);
+    await _setShapesForCurrentLevel(shapes);
 }
 
 export async function _undoLastShape() {
-    const shapes = (canvas.scene.getFlag(MODULE_ID, "shapes") ?? []).slice();
+    const shapes = _getShapesForCurrentLevel().slice();
     if (!shapes.length) return;
     shapes.pop();
-    await canvas.scene.setFlag(MODULE_ID, "shapes", shapes);
+    await _setShapesForCurrentLevel(shapes);
     await _rebuildFogFromShapes(shapes);
 }
 
@@ -629,4 +862,24 @@ async function _rebuildFogFromShapes(shapes) {
 
     await _saveAndSync();
     canvas.perception.initialize();
+}
+
+/**
+ * Reset the fog for the currently-viewed level only.
+ *
+ * canvas.fog.reset() emits a server socket that deletes ALL FogExploration documents for the
+ * scene (every level). This function targets only the current level by deleting just
+ * canvas.fog.exploration. FogExploration._onDelete already checks (user + scene + level) before
+ * calling canvas.fog.load(), so other levels' documents and fog states are untouched.
+ */
+async function _resetCurrentLevelFog() {
+    await _setShapesForCurrentLevel([]);
+    await _setWeaverFogForCurrentLevel(null);
+
+    if (canvas.fog.exploration?.id) {
+        await canvas.fog.exploration.delete();
+    } else {
+        canvas.visibility.resetExploration();
+        canvas.perception.initialize();
+    }
 }
