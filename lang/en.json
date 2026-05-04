@@ -25,6 +25,10 @@
             "SnapshotSizeWarning": {
                 "Name": "Snapshot Size Warning Threshold (KB)",
                 "Hint": "Show a warning when a fog snapshot saved during a toggle exceeds this size in kilobytes. Raise or lower this to tune when the alert appears."
+            },
+            "DebugLogging": {
+                "Name": "Debug Logging",
+                "Hint": "When enabled, Fog Weaver writes diagnostic log messages to the browser console. Disable in normal play; enable when troubleshooting."
             }
         },
         "Controls": {
